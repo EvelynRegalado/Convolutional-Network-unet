@@ -4,10 +4,9 @@ import os
 import sys
 import random
 import warnings
-
 import numpy as np
 import pandas as pd
-
+import tensorflow as tf
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
@@ -15,8 +14,6 @@ from itertools import chain
 from skimage.io import imread, imshow, imread_collection, concatenate_images
 from skimage.transform import resize
 from skimage.morphology import label
-
-from keras.models import Model, load_model
 from keras.models import *
 from keras.layers import *
 from keras.optimizers import *
@@ -26,22 +23,20 @@ from keras.layers.pooling import MaxPooling2D
 from keras.layers.merge import concatenate
 from keras.callbacks import EarlyStopping, ModelCheckpoint
 from keras import backend as K
-import matplotlib.pyplot as plt 
-
-import tensorflow as tf
+from sklearn.metrics import confusion_matrix
 
 # Set some parameters
 IMG_WIDTH = 256
 IMG_HEIGHT = 256
 IMG_CHANNELS = 3
-TRAIN_PATH = '/home/evelyn/Escritorio/unet_kaggle/stage1_train/'
-TEST_PATH = '/home/evelyn/Escritorio/unet_kaggle/stage1_test/'
+TRAIN_PATH = '/home/adrian/Escritorio/Evelyn/unet_kaggle/stage1_train/'
+TEST_PATH = '/home/adrian/Escritorio/Evelyn/unet_kaggle/stage1_test/'
 
 warnings.filterwarnings('ignore', category=UserWarning, module='skimage')
 seed = 42
 random.seed = seed
 np.random.seed = seed
-epochs=150
+epochs=5
 
 ## get train and test id
 train_ids = next(os.walk(TRAIN_PATH))[1]
@@ -56,7 +51,7 @@ print('Getting and resizing train images and masks ... ')
 sys.stdout.flush()
 for n, id_ in tqdm(enumerate(train_ids), total=len(train_ids)):
     path = TRAIN_PATH + id_
-    img = imread(path + '/images/' + id_ + '.png')[:,:,:IMG_CHANNELS]
+    img = imread(path + '/images/' + id_ + '.tif')[:,:,:IMG_CHANNELS]
     img = resize(img, (IMG_HEIGHT, IMG_WIDTH), mode='constant', preserve_range=True)
     X_train[n] = img
     mask = np.zeros((IMG_HEIGHT, IMG_WIDTH, 1), dtype=np.bool)
@@ -74,7 +69,7 @@ print('Getting and resizing test images ... ')
 sys.stdout.flush()
 for n, id_ in tqdm(enumerate(test_ids), total=len(test_ids)):
     path = TEST_PATH + id_
-    img = imread(path + '/images/' + id_ + '.png')[:,:,:IMG_CHANNELS]
+    img = imread(path + '/images/' + id_ + '.tif')[:,:,:IMG_CHANNELS]
     sizes_test.append([img.shape[0], img.shape[1]])
     img = resize(img, (IMG_HEIGHT, IMG_WIDTH), mode='constant', preserve_range=True)
     X_test[n] = img
@@ -88,7 +83,7 @@ ix = random.randint(0, len(train_ids))
 #imshow(np.squeeze(Y_train[ix]))
 #plt.show()
 
-
+#https://towardsdatascience.com/understanding-data-science-classification-metrics-in-scikit-learn-in-python-3bc336865019 
 ## define iou metric
 
 def mean_iou(y_true, y_pred):
@@ -101,83 +96,108 @@ def mean_iou(y_true, y_pred):
             score = tf.identity(score)
         prec.append(score)
     return K.mean(K.stack(prec), axis=0)
+#Metrica precision
+def precision(y_true, y_pred):
+    """Precision metric.
+    Only computes a batch-wise average of precision.
+    Computes the precision, a metric for multi-label classification of
+    how many selected items are relevant.
+    """
+    true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+    predicted_positives = K.sum(K.round(K.clip(y_pred, 0, 1)))
+    precision = true_positives / (predicted_positives + K.epsilon())
+    return precision
+
+
+#Metrica recall 
+def recall(y_true, y_pred):
+    """Recall metric.
+    Only computes a batch-wise average of recall.
+    Computes the recall, a metric for multi-label classification of
+    how many relevant items are selected.
+    """
+    true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+    possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
+    recall = true_positives / (possible_positives + K.epsilon())
+    return recall
+
+def MAP(y_true, y_pred):
+
+    np_y_true = K.get_value(y_true)
+    np_y_pred = K.get_value(y_pred)
+
+    zipped = zip(np_y_true, np_y_pred)
+    zipped.sort(key=lambda x:x[1],reverse=True)
+
+    np_y_true, np_y_pred = zip(*zipped)
+    k_list = [i for i in range(len(np_y_true)) if int(np_y_true[i])==1]
+    score = 0.
+    r = np.sum(np_y_true).astype(np.int64)
+    for k in k_list:
+        Yk = np.sum(np_y_true[:k+1])
+        score += Yk/(k+1)
+
+    score/=r
+
+    return K.variable(score)
 
 ## build the unet model with keras
 inputs = Input((IMG_HEIGHT, IMG_WIDTH, IMG_CHANNELS))
 s = Lambda(lambda x: x / 255) (inputs)
 
+conv1 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(s)
+conv1 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv1)
+pool1 = MaxPooling2D(pool_size=(2, 2))(conv1)
 
-c1 = Conv2D(16, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (s)
-c1 = Dropout(0.1) (c1)
-c1 = Conv2D(16, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (c1)
-p1 = MaxPooling2D((2, 2)) (c1)
+conv2 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(pool1)
+conv2 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv2)
+pool2 = MaxPooling2D(pool_size=(2, 2))(conv2)
 
-c2 = Conv2D(32, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (p1)
-c2 = Dropout(0.1) (c2)
-c2 = Conv2D(32, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (c2)
-p2 = MaxPooling2D((2, 2)) (c2)
+conv3 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(pool2)
+conv3 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv3)
+pool3 = MaxPooling2D(pool_size=(2, 2))(conv3)
 
-c3 = Conv2D(64, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (p2)
-c3 = Dropout(0.2) (c3)
-c3 = Conv2D(64, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (c3)
-p3 = MaxPooling2D((2, 2)) (c3)
+conv4 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(pool3)
+conv4 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv4)
+drop4 = Dropout(0.5)(conv4)
+pool4 = MaxPooling2D(pool_size=(2, 2))(drop4)
 
-c4 = Conv2D(128, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (p3)
-c4 = Dropout(0.2) (c4)
-c4 = Conv2D(128, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (c4)
-p4 = MaxPooling2D(pool_size=(2, 2)) (c4)
+conv5 = Conv2D(1024, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(pool4)
+conv5 = Conv2D(1024, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv5)
+drop5 = Dropout(0.5)(conv5)
 
-c5 = Conv2D(256, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (p4)
-c5 = Dropout(0.3) (c5)
-c5 = Conv2D(256, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (c5)
-p5 = MaxPooling2D(pool_size=(2, 2)) (c5)
+up6 = Conv2D(512, 2, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(UpSampling2D(size = (2,2))(drop5))
+merge6 = concatenate([drop4,up6], axis = 3)
+conv6 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(merge6)
+conv6 = Conv2D(512, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv6)
 
-c = Conv2D(512, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (p5)
-c = Dropout(0.3) (c)
-c = Conv2D(512, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (c)
+up7 = Conv2D(256, 2, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(UpSampling2D(size = (2,2))(conv6))
+merge7 = concatenate([conv3,up7], axis = 3)
+conv7 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(merge7)
+conv7 = Conv2D(256, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv7)
 
-u = Conv2DTranspose(256, (2, 2), strides=(2, 2), padding='same') (c)
-u = concatenate([u, c5])
-c0 = Conv2D(256, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (u)
-c0 = Dropout(0.2) (c0)
-c0 = Conv2D(256, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (c0)
+up8 = Conv2D(128, 2, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(UpSampling2D(size = (2,2))(conv7))
+merge8 = concatenate([conv2,up8], axis = 3)
+conv8 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(merge8)
+conv8 = Conv2D(128, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv8)
 
-u6 = Conv2DTranspose(128, (2, 2), strides=(2, 2), padding='same') (c0)
-u6 = concatenate([u6, c4])
-c6 = Conv2D(128, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (u6)
-c6 = Dropout(0.2) (c6)
-c6 = Conv2D(128, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (c6)
+up9 = Conv2D(64, 2, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(UpSampling2D(size = (2,2))(conv8))
+merge9 = concatenate([conv1,up9], axis = 3)
+conv9 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(merge9)
+conv9 = Conv2D(64, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv9)
+conv9 = Conv2D(2, 3, activation = 'relu', padding = 'same', kernel_initializer = 'he_normal')(conv9)
+conv10 = Conv2D(1, 1, activation = 'sigmoid')(conv9)
 
-u7 = Conv2DTranspose(64, (2, 2), strides=(2, 2), padding='same') (c6)
-u7 = concatenate([u7, c3])
-c7 = Conv2D(64, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (u7)
-c7 = Dropout(0.2) (c7)
-c7 = Conv2D(64, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (c7)
-
-u8 = Conv2DTranspose(32, (2, 2), strides=(2, 2), padding='same') (c7)
-u8 = concatenate([u8, c2])
-c8 = Conv2D(32, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (u8)
-c8 = Dropout(0.1) (c8)
-c8 = Conv2D(32, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (c8)
-
-u9 = Conv2DTranspose(16, (2, 2), strides=(2, 2), padding='same') (c8)
-u9 = concatenate([u9, c1], axis=3)
-c9 = Conv2D(16, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (u9)
-c9 = Dropout(0.1) (c9)
-c9 = Conv2D(16, (3, 3), activation='elu', kernel_initializer='he_normal', padding='same') (c9)
-
-
-outputs = Conv2D(1, (1, 1), activation='sigmoid') (c9)
-
-model = Model(inputs=[inputs], outputs=[outputs])
-model.compile(optimizer='adam', loss='binary_crossentropy', metrics=[mean_iou, 'accuracy'])
-model.summary()
+model = Model(inputs=[inputs], output = conv10)
+model.compile(optimizer = Adam(lr = 1e-4), loss = 'binary_crossentropy', metrics = [mean_iou, precision, recall, 'acc'])
+    
+#model.summary()
 
 ## fit the model
 earlystopper = EarlyStopping(patience=5, verbose=1)
-checkpointer = ModelCheckpoint('/home/evelyn/Escritorio/unet_kaggle/model-dsbowl2018-1.h5', verbose=1, save_best_only=True)
+checkpointer = ModelCheckpoint('/home/adrian/Escritorio/Evelyn/unet_kaggle/model-dsbowl2018-1.h5', verbose=1, save_best_only=True)
 results = model.fit(X_train, Y_train, validation_split=0.1, batch_size=32, epochs=epochs,
-                    callbacks=[earlystopper, checkpointer])
+callbacks=[earlystopper, checkpointer])
 
 
 # list all data in history 
@@ -202,7 +222,7 @@ plt.show()
 ## make predictions
 
 # Predict on train, val and test
-model = load_model('/home/evelyn/Escritorio/unet_kaggle/model-dsbowl2018-1.h5', custom_objects={'mean_iou': mean_iou})
+model = load_model('/home/adrian/Escritorio/Evelyn/unet_kaggle/model-dsbowl2018-1.h5', custom_objects={'mean_iou': mean_iou})
 preds_train = model.predict(X_train[:int(X_train.shape[0]*0.9)], verbose=1)
 preds_val = model.predict(X_train[int(X_train.shape[0]*0.9):], verbose=1)
 preds_test = model.predict(X_test, verbose=1)
@@ -271,4 +291,4 @@ for n, id_ in enumerate(test_ids):
 sub = pd.DataFrame()
 sub['ImageId'] = new_test_ids
 sub['EncodedPixels'] = pd.Series(rles).apply(lambda x: ' '.join(str(y) for y in x))
-sub.to_csv('/home/evelyn/Escritorio/unet_kaggle/sub-dsbowl2018-1.csv', index=False)
+sub.to_csv('/home/adrian/Escritorio/Evelyn/unet_kaggle/sub-dsbowl2018-1.csv', index=False)
